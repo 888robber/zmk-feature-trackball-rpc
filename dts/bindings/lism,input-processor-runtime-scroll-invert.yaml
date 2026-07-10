@@ -1,0 +1,22 @@
+# Adapted from zmkfirmware/zmk's own zmk,input-processor-scaler.yaml
+# (app/dts/bindings/input_processors/zmk,input-processor-scaler.yaml, v0.3.0).
+# Same event-type/codes filtering shape, but instead of a devicetree-fixed
+# multiplier this driver just negates the matched axis when a runtime flag
+# (live-settable via the trackball RPC service) is set.
+
+description: |
+  Inverts the sign of matching input events (e.g. scroll wheel axes) when
+  a runtime flag is set. The flag defaults to off and is live-adjustable
+  via the LisM trackball RPC service (trackball_rpc_apply_scroll_invert).
+
+compatible: "lism,input-processor-runtime-scroll-invert"
+
+include: ip_zero_param.yaml
+
+properties:
+  type:
+    type: int
+    required: true
+  codes:
+    type: array
+    required: true
