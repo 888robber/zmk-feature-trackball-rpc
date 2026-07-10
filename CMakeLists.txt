@@ -9,3 +9,7 @@ if(CONFIG_TRACKBALL_RPC)
   # globally, so we pull in its module dir explicitly.
   target_include_directories(app PRIVATE ${ZEPHYR_ZMK_DRIVER_PAW3222_MODULE_DIR}/include)
 endif()
+
+if(CONFIG_LISM_COMBO_RPC)
+  target_sources(app PRIVATE src/lism_runtime_combo.c)
+endif()

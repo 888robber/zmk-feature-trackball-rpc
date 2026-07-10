@@ -11,4 +11,27 @@ config TRACKBALL_RPC_AML_MAX_ACTION_EVENTS
     depends on TRACKBALL_RPC
     default 4
 
+config LISM_COMBO_RPC
+    bool "Enable LisM runtime-editable combos (+ BLE RPC service)"
+    depends on BT_PERIPHERAL
+    select SETTINGS
+    select ZMK_BEHAVIOR_LOCAL_IDS
+    default n
+
+config LISM_COMBO_RPC_MAX_COMBOS
+    int "Max number of runtime combo slots"
+    depends on LISM_COMBO_RPC
+    range 1 32
+    default 16
+
+config LISM_COMBO_RPC_MAX_PRESSED
+    int "Max simultaneously held combos"
+    depends on LISM_COMBO_RPC
+    default 4
+
+config LISM_COMBO_RPC_TEST_COMBO
+    bool "Seed a Q+W -> Esc test combo on first boot (hardware verification)"
+    depends on LISM_COMBO_RPC
+    default n
+
 endmenu
