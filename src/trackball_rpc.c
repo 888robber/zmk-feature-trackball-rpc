@@ -6,8 +6,10 @@
  * all) that lets a companion app read and live-adjust:
  *   - cursor sensitivity (CPI)
  *   - "precision mode" secondary CPI + on/off toggle
- *   - scroll direction invert              (hardware effect wired in a
- *   - automatic mouse layer idle threshold  later phase; stored/echoed here)
+ *   - scroll direction invert
+ *   - automatic mouse layer idle threshold
+ *   - cursor acceleration curve (enabled, max multiplier, kick-in speed,
+ *     ramp width)
  *
  * All values persist across reboot via the Zephyr settings subsystem.
  */
@@ -54,6 +56,10 @@ static const struct bt_uuid_128 trackball_rpc_char_uuid =
 #define OP_SET_PRECISION_ON  0x03 /* payload: u8 (0/1) */
 #define OP_SET_SCROLL_INVERT 0x04 /* payload: u8 (0/1) */
 #define OP_SET_AML_IDLE_MS   0x05 /* payload: u16 LE */
+#define OP_SET_ACCEL_ENABLED 0x06 /* payload: u8 (0/1) */
+#define OP_SET_ACCEL_MAX     0x07 /* payload: u16 LE, multiplier x100 (e.g. 140 = 1.40x) */
+#define OP_SET_ACCEL_KICK_IN 0x08 /* payload: u16 LE, counts/sec */
+#define OP_SET_ACCEL_RAMP    0x09 /* payload: u16 LE, counts/sec width */
 #define OP_GET_ALL           0x10 /* no payload */
 
 /* Notify opcodes (keyboard -> app) */
@@ -71,6 +77,10 @@ struct trackball_rpc_state {
     uint8_t precision_active;
     uint8_t scroll_invert;
     uint16_t aml_idle_ms;
+    uint8_t accel_enabled;
+    uint16_t accel_max_x100;
+    uint16_t accel_kick_in;
+    uint16_t accel_ramp;
 } __packed;
 
 static struct trackball_rpc_state state = {
@@ -79,6 +89,10 @@ static struct trackball_rpc_state state = {
     .precision_active = 0,
     .scroll_invert = 0,
     .aml_idle_ms = 1000,
+    .accel_enabled = 0,
+    .accel_max_x100 = 140,
+    .accel_kick_in = 400,
+    .accel_ramp = 800,
 };
 
 static const struct device *trackball_dev;
@@ -108,6 +122,18 @@ __weak void trackball_rpc_apply_scroll_invert(bool invert) {
 __weak void trackball_rpc_apply_aml_idle_ms(uint16_t idle_ms) {
     ARG_UNUSED(idle_ms);
 }
+__weak void trackball_rpc_apply_accel(bool enabled, uint16_t max_x100, uint16_t kick_in_speed,
+                                        uint16_t ramp_width) {
+    ARG_UNUSED(enabled);
+    ARG_UNUSED(max_x100);
+    ARG_UNUSED(kick_in_speed);
+    ARG_UNUSED(ramp_width);
+}
+
+static void apply_accel(void) {
+    trackball_rpc_apply_accel(state.accel_enabled, state.accel_max_x100, state.accel_kick_in,
+                                state.accel_ramp);
+}
 
 static void apply_cursor_sensitivity(void) {
     if (!trackball_dev || !device_is_ready(trackball_dev)) {
@@ -127,13 +153,17 @@ static void notify_state(struct bt_conn *conn) {
         return;
     }
 
-    uint8_t packet[9];
+    uint8_t packet[16];
     packet[0] = OP_STATE_NOTIFY;
     sys_put_le16(state.cursor_cpi, &packet[1]);
     sys_put_le16(state.precision_cpi, &packet[3]);
     packet[5] = state.precision_active;
     packet[6] = state.scroll_invert;
     sys_put_le16(state.aml_idle_ms, &packet[7]);
+    packet[9] = state.accel_enabled;
+    sys_put_le16(state.accel_max_x100, &packet[10]);
+    sys_put_le16(state.accel_kick_in, &packet[12]);
+    sys_put_le16(state.accel_ramp, &packet[14]);
 
     int ret = bt_gatt_notify_uuid(NULL, &trackball_rpc_char_uuid.uuid, trackball_rpc_svc.attrs,
                                     packet, sizeof(packet));
@@ -235,6 +265,34 @@ static ssize_t on_write(struct bt_conn *conn, const struct bt_gatt_attr *attr, c
             changed = true;
         }
         break;
+    case OP_SET_ACCEL_ENABLED:
+        if (len >= 2) {
+            state.accel_enabled = data[1] ? 1 : 0;
+            apply_accel();
+            changed = true;
+        }
+        break;
+    case OP_SET_ACCEL_MAX:
+        if (len >= 3) {
+            state.accel_max_x100 = sys_get_le16(&data[1]);
+            apply_accel();
+            changed = true;
+        }
+        break;
+    case OP_SET_ACCEL_KICK_IN:
+        if (len >= 3) {
+            state.accel_kick_in = sys_get_le16(&data[1]);
+            apply_accel();
+            changed = true;
+        }
+        break;
+    case OP_SET_ACCEL_RAMP:
+        if (len >= 3) {
+            state.accel_ramp = sys_get_le16(&data[1]);
+            apply_accel();
+            changed = true;
+        }
+        break;
     case OP_GET_ALL:
         break;
     default:
@@ -281,11 +339,13 @@ static int trackball_rpc_init(void) {
     apply_cursor_sensitivity();
     trackball_rpc_apply_scroll_invert(state.scroll_invert);
     trackball_rpc_apply_aml_idle_ms(state.aml_idle_ms);
+    apply_accel();
 
     LOG_INF("trackball-rpc init: cursor_cpi=%u precision_cpi=%u precision=%u scroll_invert=%u "
-            "aml_idle_ms=%u",
+            "aml_idle_ms=%u accel_enabled=%u accel_max_x100=%u accel_kick_in=%u accel_ramp=%u",
             state.cursor_cpi, state.precision_cpi, state.precision_active, state.scroll_invert,
-            state.aml_idle_ms);
+            state.aml_idle_ms, state.accel_enabled, state.accel_max_x100, state.accel_kick_in,
+            state.accel_ramp);
 
     return 0;
 }

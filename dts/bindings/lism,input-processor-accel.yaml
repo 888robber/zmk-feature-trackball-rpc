@@ -1,0 +1,11 @@
+description: |
+  LisM cursor acceleration curve input processor. Applies an extra
+  speed-dependent multiplier on top of the flat CPI-based sensitivity:
+  moving the trackball faster produces proportionally larger cursor
+  jumps. All parameters (enabled, max multiplier, kick-in speed, ramp
+  width) are runtime-mutable, live-settable via the trackball RPC
+  service — there are no devicetree properties to configure here.
+
+compatible: "lism,input-processor-accel"
+
+include: ip_zero_param.yaml
