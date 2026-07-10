@@ -1,0 +1,22 @@
+description: |
+  LisM trackball live-settings RPC bridge. Links the custom BLE RPC
+  service (separate from ZMK Studio's own service/characteristic) to the
+  PAW3222 trackball sensor device it controls, and to the runtime
+  input-processors used for scroll direction invert and the automatic
+  mouse layer idle threshold.
+
+  Example:
+  / {
+      trackball_rpc: trackball_rpc {
+          compatible = "lism,trackball-rpc";
+          device = <&trackball_central>;
+      };
+  };
+
+compatible: "lism,trackball-rpc"
+
+properties:
+  device:
+    type: phandle
+    required: true
+    description: phandle to the paw3222 trackball sensor device node.

@@ -1,0 +1,9 @@
+menu "LisM Trackball RPC"
+
+config TRACKBALL_RPC
+    bool "Enable LisM trackball live-settings BLE RPC service"
+    depends on BT_PERIPHERAL
+    select SETTINGS
+    default n
+
+endmenu
