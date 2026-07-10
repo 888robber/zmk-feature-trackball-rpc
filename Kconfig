@@ -6,4 +6,9 @@ config TRACKBALL_RPC
     select SETTINGS
     default n
 
+config TRACKBALL_RPC_AML_MAX_ACTION_EVENTS
+    int "Max queued automatic-mouse-layer state-change actions"
+    depends on TRACKBALL_RPC
+    default 4
+
 endmenu

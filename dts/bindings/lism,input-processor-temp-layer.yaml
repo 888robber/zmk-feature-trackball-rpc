@@ -1,0 +1,30 @@
+# Adapted from zmkfirmware/zmk's own zmk,input-processor-temp-layer.yaml
+# (app/dts/bindings/input_processors/zmk,input-processor-temp-layer.yaml,
+# v0.3.0). Same shape, but the driver behind this compatible reads its
+# "how long to wait before auto-deactivating" value from a runtime-mutable
+# global (settable live via the trackball RPC service) instead of trusting
+# the param2 devicetree cell, which ZMK's own version bakes in at build time.
+
+description: |
+  LisM automatic mouse layer input processor. Temporarily activates a
+  layer while the trackball is in motion, and deactivates it again after
+  an idle period. Unlike upstream zmk,input-processor-temp-layer, the
+  idle period (normally param2) is live-adjustable at runtime via the
+  LisM trackball RPC service instead of being devicetree-fixed.
+
+compatible: "lism,input-processor-temp-layer"
+
+include: ip_two_param.yaml
+
+properties:
+  require-prior-idle-ms:
+    type: int
+    required: false
+    default: 0
+    description: Time in milliseconds that must pass after the last keystroke before the layer can be toggled
+
+  excluded-positions:
+    type: array
+    required: false
+    default: []
+    description: Array of key positions that will NOT trigger layer deactivation when pressed
