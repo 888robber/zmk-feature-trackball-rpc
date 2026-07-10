@@ -16,6 +16,16 @@
  *
  * Raw motion is swallowed (ZMK_INPUT_PROC_STOP) rather than passed
  * through, so the cursor doesn't also jump around while gesturing.
+ *
+ * IMPORTANT: press and release are NOT invoked back-to-back
+ * synchronously. ZMK's own macro system (&macro_tap) always spaces a
+ * synthesized press/release pair apart by tap-ms via a delayed work
+ * item rather than calling both in the same call stack — mirrored here
+ * with lism_gesture_release_work. An earlier version of this file
+ * called invoke_binding(true) immediately followed by invoke_binding
+ * (false) with zero delay, which was suspected of corrupting HID/
+ * behavior state on real hardware (observed as macOS's Bluetooth
+ * connection to the keyboard dropping when a gesture fired).
  */
 
 #define DT_DRV_COMPAT lism_input_processor_gesture
@@ -32,6 +42,10 @@
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
+/* Matches ZMK's own &macro_tap default spacing between a synthesized
+ * press and release. */
+#define LISM_GESTURE_TAP_MS 20
+
 struct lism_gesture_config {
     uint8_t index;
     int32_t threshold;
@@ -43,10 +57,25 @@ struct lism_gesture_data {
     int32_t accum_x;
     int32_t accum_y;
     int64_t cooldown_until_ms;
+    struct k_work_delayable release_work;
+    const struct zmk_behavior_binding *pending_release;
+    struct zmk_behavior_binding_event pending_event;
 };
 
+static void lism_gesture_release_work_cb(struct k_work *work) {
+    struct k_work_delayable *d_work = k_work_delayable_from_work(work);
+    struct lism_gesture_data *data =
+        CONTAINER_OF(d_work, struct lism_gesture_data, release_work);
+
+    if (data->pending_release) {
+        zmk_behavior_invoke_binding(data->pending_release, data->pending_event, false);
+        data->pending_release = NULL;
+    }
+}
+
 static void lism_gesture_fire(const struct zmk_behavior_binding *binding,
-                                struct zmk_input_processor_state *state) {
+                                struct zmk_input_processor_state *state,
+                                struct lism_gesture_data *data) {
     struct zmk_behavior_binding_event behavior_event = {
         .position = ZMK_VIRTUAL_KEY_POSITION_BEHAVIOR_INPUT_PROCESSOR(state->input_device_index, 0),
         .timestamp = k_uptime_get(),
@@ -56,7 +85,10 @@ static void lism_gesture_fire(const struct zmk_behavior_binding *binding,
     };
 
     zmk_behavior_invoke_binding(binding, behavior_event, true);
-    zmk_behavior_invoke_binding(binding, behavior_event, false);
+
+    data->pending_release = binding;
+    data->pending_event = behavior_event;
+    k_work_schedule(&data->release_work, K_MSEC(LISM_GESTURE_TAP_MS));
 }
 
 static int lism_gesture_handle_event(const struct device *dev, struct input_event *event,
@@ -96,13 +128,19 @@ static int lism_gesture_handle_event(const struct device *dev, struct input_even
 
     if (fire) {
         LOG_DBG("LisM gesture fired: dx=%d dy=%d", data->accum_x, data->accum_y);
-        lism_gesture_fire(fire, state);
+        lism_gesture_fire(fire, state, data);
         data->accum_x = 0;
         data->accum_y = 0;
         data->cooldown_until_ms = now + cfg->cooldown_ms;
     }
 
     return ZMK_INPUT_PROC_STOP;
+}
+
+static int lism_gesture_init(const struct device *dev) {
+    struct lism_gesture_data *data = dev->data;
+    k_work_init_delayable(&data->release_work, lism_gesture_release_work_cb);
+    return 0;
 }
 
 static struct zmk_input_processor_driver_api lism_gesture_driver_api = {
@@ -121,8 +159,8 @@ static struct zmk_input_processor_driver_api lism_gesture_driver_api = {
         .bindings = lism_gesture_bindings_##n,                                                      \
     };                                                                                              \
     static struct lism_gesture_data lism_gesture_data_##n;                                          \
-    DEVICE_DT_INST_DEFINE(n, NULL, NULL, &lism_gesture_data_##n, &lism_gesture_config_##n,           \
-                          POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,                          \
-                          &lism_gesture_driver_api);
+    DEVICE_DT_INST_DEFINE(n, lism_gesture_init, NULL, &lism_gesture_data_##n,                        \
+                          &lism_gesture_config_##n, POST_KERNEL,                                     \
+                          CONFIG_KERNEL_INIT_PRIORITY_DEFAULT, &lism_gesture_driver_api);
 
 DT_INST_FOREACH_STATUS_OKAY(LISM_GESTURE_INST)
