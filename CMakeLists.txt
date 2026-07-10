@@ -11,5 +11,5 @@ if(CONFIG_TRACKBALL_RPC)
 endif()
 
 if(CONFIG_LISM_COMBO_RPC)
-  target_sources(app PRIVATE src/lism_runtime_combo.c)
+  target_sources(app PRIVATE src/lism_runtime_combo.c src/lism_combo_rpc.c)
 endif()
