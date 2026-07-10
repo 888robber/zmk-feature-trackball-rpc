@@ -80,6 +80,22 @@ static struct trackball_rpc_state state = {
 static const struct device *trackball_dev;
 static bool notify_enabled;
 
+/* Forward declarations: on_write/ccc_cfg_changed are defined further down
+ * (they call notify_state, which needs the service's attrs), and
+ * trackball_rpc_svc itself is only fully defined by the
+ * BT_GATT_SERVICE_DEFINE macro later in the file. */
+static ssize_t on_write(struct bt_conn *conn, const struct bt_gatt_attr *attr, const void *buf,
+                          uint16_t len, uint16_t offset, uint8_t flags);
+static void ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value);
+
+BT_GATT_SERVICE_DEFINE(trackball_rpc_svc, BT_GATT_PRIMARY_SERVICE(&trackball_rpc_service_uuid),
+                        BT_GATT_CHARACTERISTIC(&trackball_rpc_char_uuid.uuid,
+                                                 BT_GATT_CHRC_WRITE |
+                                                     BT_GATT_CHRC_WRITE_WITHOUT_RESP |
+                                                     BT_GATT_CHRC_NOTIFY,
+                                                 BT_GATT_PERM_WRITE, NULL, on_write, NULL),
+                        BT_GATT_CCC(ccc_cfg_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE), );
+
 /* Defined in runtime_input_processors.c, added in a later phase. Weak
  * no-op stubs here so this file links standalone until that lands. */
 __weak void trackball_rpc_apply_scroll_invert(bool invert) {
@@ -204,14 +220,6 @@ static void ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value) {
         notify_state(NULL);
     }
 }
-
-BT_GATT_SERVICE_DEFINE(trackball_rpc_svc, BT_GATT_PRIMARY_SERVICE(&trackball_rpc_service_uuid),
-                        BT_GATT_CHARACTERISTIC(&trackball_rpc_char_uuid.uuid,
-                                                 BT_GATT_CHRC_WRITE |
-                                                     BT_GATT_CHRC_WRITE_WITHOUT_RESP |
-                                                     BT_GATT_CHRC_NOTIFY,
-                                                 BT_GATT_PERM_WRITE, NULL, on_write, NULL),
-                        BT_GATT_CCC(ccc_cfg_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE), );
 
 static int trackball_rpc_settings_set(const char *name, size_t len, settings_read_cb read_cb,
                                         void *cb_arg) {
