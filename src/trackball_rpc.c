@@ -10,6 +10,7 @@
  *   - automatic mouse layer idle threshold
  *   - cursor acceleration curve (enabled, max multiplier, kick-in speed,
  *     ramp width)
+ *   - both halves' battery level (read-only)
  *
  * All values persist across reboot via the Zephyr settings subsystem.
  */
@@ -30,6 +31,11 @@
 #include <zmk/keymap.h>
 #include <zmk/event_manager.h>
 #include <zmk/events/layer_state_changed.h>
+#include <zmk/battery.h>
+#include <zmk/events/battery_state_changed.h>
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
+#include <zmk/split/central.h>
+#endif
 
 LOG_MODULE_REGISTER(trackball_rpc, CONFIG_ZMK_LOG_LEVEL);
 
@@ -98,6 +104,13 @@ static struct trackball_rpc_state state = {
 static const struct device *trackball_dev;
 static bool notify_enabled;
 
+/* Battery levels are transient (re-read from hardware/split link on every
+ * boot) so they deliberately live outside trackball_rpc_state -- adding
+ * them there would grow the persisted settings blob and reset every other
+ * saved value again, for no benefit. */
+static uint8_t central_battery_level;
+static uint8_t peripheral_battery_level;
+
 /* Forward declarations: on_write/ccc_cfg_changed are defined further down
  * (they call notify_state, which needs the service's attrs), and
  * trackball_rpc_svc itself is only fully defined by the
@@ -153,7 +166,7 @@ static void notify_state(struct bt_conn *conn) {
         return;
     }
 
-    uint8_t packet[16];
+    uint8_t packet[18];
     packet[0] = OP_STATE_NOTIFY;
     sys_put_le16(state.cursor_cpi, &packet[1]);
     sys_put_le16(state.precision_cpi, &packet[3]);
@@ -164,6 +177,8 @@ static void notify_state(struct bt_conn *conn) {
     sys_put_le16(state.accel_max_x100, &packet[10]);
     sys_put_le16(state.accel_kick_in, &packet[12]);
     sys_put_le16(state.accel_ramp, &packet[14]);
+    packet[16] = central_battery_level;
+    packet[17] = peripheral_battery_level;
 
     int ret = bt_gatt_notify_uuid(NULL, &trackball_rpc_char_uuid.uuid, trackball_rpc_svc.attrs,
                                     packet, sizeof(packet));
@@ -208,6 +223,33 @@ static int trackball_rpc_layer_listener(const zmk_event_t *eh) {
 
 ZMK_LISTENER(trackball_rpc_layer, trackball_rpc_layer_listener);
 ZMK_SUBSCRIPTION(trackball_rpc_layer, zmk_layer_state_changed);
+
+/* Battery levels for both halves, pushed to the app the same way layer
+ * changes are -- central's own battery via zmk_battery_state_changed,
+ * the peripheral's (proxied over the split link) via
+ * zmk_peripheral_battery_state_changed. */
+static int trackball_rpc_battery_listener(const zmk_event_t *eh) {
+    const struct zmk_battery_state_changed *bat_ev = as_zmk_battery_state_changed(eh);
+    if (bat_ev) {
+        central_battery_level = bat_ev->state_of_charge;
+        notify_state(NULL);
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+
+    const struct zmk_peripheral_battery_state_changed *periph_ev =
+        as_zmk_peripheral_battery_state_changed(eh);
+    if (periph_ev) {
+        peripheral_battery_level = periph_ev->state_of_charge;
+        notify_state(NULL);
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+
+    return ZMK_EV_EVENT_BUBBLE;
+}
+
+ZMK_LISTENER(trackball_rpc_battery, trackball_rpc_battery_listener);
+ZMK_SUBSCRIPTION(trackball_rpc_battery, zmk_battery_state_changed);
+ZMK_SUBSCRIPTION(trackball_rpc_battery, zmk_peripheral_battery_state_changed);
 
 static ssize_t on_write(struct bt_conn *conn, const struct bt_gatt_attr *attr, const void *buf,
                           uint16_t len, uint16_t offset, uint8_t flags) {
@@ -340,6 +382,14 @@ static int trackball_rpc_init(void) {
     trackball_rpc_apply_scroll_invert(state.scroll_invert);
     trackball_rpc_apply_aml_idle_ms(state.aml_idle_ms);
     apply_accel();
+
+    central_battery_level = zmk_battery_state_of_charge();
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
+    uint8_t periph_level = 0;
+    if (zmk_split_central_get_peripheral_battery_level(0, &periph_level) == 0) {
+        peripheral_battery_level = periph_level;
+    }
+#endif
 
     LOG_INF("trackball-rpc init: cursor_cpi=%u precision_cpi=%u precision=%u scroll_invert=%u "
             "aml_idle_ms=%u accel_enabled=%u accel_max_x100=%u accel_kick_in=%u accel_ramp=%u",
