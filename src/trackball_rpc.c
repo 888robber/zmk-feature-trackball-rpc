@@ -25,6 +25,9 @@
 #include <zephyr/logging/log.h>
 
 #include <paw3222.h>
+#include <zmk/keymap.h>
+#include <zmk/event_manager.h>
+#include <zmk/events/layer_state_changed.h>
 
 LOG_MODULE_REGISTER(trackball_rpc, CONFIG_ZMK_LOG_LEVEL);
 
@@ -53,8 +56,9 @@ static const struct bt_uuid_128 trackball_rpc_char_uuid =
 #define OP_SET_AML_IDLE_MS   0x05 /* payload: u16 LE */
 #define OP_GET_ALL           0x10 /* no payload */
 
-/* Notify opcode (keyboard -> app), sent after every write and on subscribe */
-#define OP_STATE_NOTIFY 0x80
+/* Notify opcodes (keyboard -> app) */
+#define OP_STATE_NOTIFY 0x80 /* sent after every write and on subscribe */
+#define OP_LAYER_NOTIFY 0x81 /* sent whenever the active (topmost) layer changes */
 
 /* PAW3222 register step is 38, valid range is 16*38..127*38 (see
  * zmk-driver-paw3222's RES_MIN/RES_MAX). */
@@ -142,6 +146,39 @@ static void save_state(void) {
     settings_save_one("trackball_rpc/state", &state, sizeof(state));
 }
 
+/* Pushes the current topmost active layer whenever it changes, so the app
+ * (mini panel / editor) can mirror real device state live over BLE instead
+ * of only reacting to user-initiated key presses or a manual layer pick in
+ * the editor's sidebar — needed since e.g. the AML processor changes the
+ * active layer on its own, with no key press involved. */
+static void notify_layer_state(void) {
+    if (!notify_enabled) {
+        return;
+    }
+
+    uint8_t top_layer = 0;
+    for (uint8_t i = 0; i < ZMK_KEYMAP_LAYERS_LEN; i++) {
+        if (zmk_keymap_layer_active(i)) {
+            top_layer = i;
+        }
+    }
+
+    uint8_t packet[2] = {OP_LAYER_NOTIFY, top_layer};
+    int ret = bt_gatt_notify_uuid(NULL, &trackball_rpc_char_uuid.uuid, trackball_rpc_svc.attrs,
+                                    packet, sizeof(packet));
+    if (ret < 0) {
+        LOG_WRN("trackball-rpc layer notify failed: %d", ret);
+    }
+}
+
+static int trackball_rpc_layer_listener(const zmk_event_t *eh) {
+    notify_layer_state();
+    return ZMK_EV_EVENT_BUBBLE;
+}
+
+ZMK_LISTENER(trackball_rpc_layer, trackball_rpc_layer_listener);
+ZMK_SUBSCRIPTION(trackball_rpc_layer, zmk_layer_state_changed);
+
 static ssize_t on_write(struct bt_conn *conn, const struct bt_gatt_attr *attr, const void *buf,
                           uint16_t len, uint16_t offset, uint8_t flags) {
     ARG_UNUSED(attr);
@@ -218,6 +255,7 @@ static void ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value) {
     notify_enabled = (value == BT_GATT_CCC_NOTIFY);
     if (notify_enabled) {
         notify_state(NULL);
+        notify_layer_state();
     }
 }
 
