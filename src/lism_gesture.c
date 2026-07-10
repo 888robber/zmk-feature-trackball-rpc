@@ -17,15 +17,21 @@
  * Raw motion is swallowed (ZMK_INPUT_PROC_STOP) rather than passed
  * through, so the cursor doesn't also jump around while gesturing.
  *
- * IMPORTANT: press and release are NOT invoked back-to-back
- * synchronously. ZMK's own macro system (&macro_tap) always spaces a
- * synthesized press/release pair apart by tap-ms via a delayed work
- * item rather than calling both in the same call stack — mirrored here
- * with lism_gesture_release_work. An earlier version of this file
- * called invoke_binding(true) immediately followed by invoke_binding
- * (false) with zero delay, which was suspected of corrupting HID/
- * behavior state on real hardware (observed as macOS's Bluetooth
- * connection to the keyboard dropping when a gesture fired).
+ * IMPORTANT — two defensive changes after a real-hardware Bluetooth
+ * disconnect bug (still not fully root-caused as of this writing, see
+ * project memory):
+ *   1. Press and release are NOT invoked back-to-back synchronously.
+ *      ZMK's own macro system (&macro_tap) always spaces a synthesized
+ *      press/release pair apart by tap-ms via a delayed work item
+ *      rather than calling both in the same call stack.
+ *   2. Neither press nor release is invoked directly from
+ *      handle_event(), which runs on the trackball driver's own
+ *      motion-handling work item (see paw32xx_motion_work_handler in
+ *      zmk-driver-paw3222). Both are deferred to their own work items
+ *      instead, so handle_event() only ever does cheap arithmetic and
+ *      a non-blocking k_work_submit() — invoking a behavior (which may
+ *      itself do non-trivial work, e.g. a BLE HID report) never nests
+ *      inside the sensor's own call stack/timing.
  */
 
 #define DT_DRV_COMPAT lism_input_processor_gesture
@@ -57,8 +63,9 @@ struct lism_gesture_data {
     int32_t accum_x;
     int32_t accum_y;
     int64_t cooldown_until_ms;
+    struct k_work press_work;
     struct k_work_delayable release_work;
-    const struct zmk_behavior_binding *pending_release;
+    const struct zmk_behavior_binding *pending_binding;
     struct zmk_behavior_binding_event pending_event;
 };
 
@@ -67,28 +74,36 @@ static void lism_gesture_release_work_cb(struct k_work *work) {
     struct lism_gesture_data *data =
         CONTAINER_OF(d_work, struct lism_gesture_data, release_work);
 
-    if (data->pending_release) {
-        zmk_behavior_invoke_binding(data->pending_release, data->pending_event, false);
-        data->pending_release = NULL;
+    if (data->pending_binding) {
+        zmk_behavior_invoke_binding(data->pending_binding, data->pending_event, false);
+        data->pending_binding = NULL;
+    }
+}
+
+static void lism_gesture_press_work_cb(struct k_work *work) {
+    struct lism_gesture_data *data = CONTAINER_OF(work, struct lism_gesture_data, press_work);
+
+    if (data->pending_binding) {
+        zmk_behavior_invoke_binding(data->pending_binding, data->pending_event, true);
+        k_work_schedule(&data->release_work, K_MSEC(LISM_GESTURE_TAP_MS));
     }
 }
 
 static void lism_gesture_fire(const struct zmk_behavior_binding *binding,
                                 struct zmk_input_processor_state *state,
                                 struct lism_gesture_data *data) {
-    struct zmk_behavior_binding_event behavior_event = {
+    /* Capture everything handle_event's transient `state` pointer gives us
+     * right now; the press itself runs later on its own work item, off
+     * the sensor's own call stack. */
+    data->pending_binding = binding;
+    data->pending_event = (struct zmk_behavior_binding_event){
         .position = ZMK_VIRTUAL_KEY_POSITION_BEHAVIOR_INPUT_PROCESSOR(state->input_device_index, 0),
         .timestamp = k_uptime_get(),
 #if IS_ENABLED(CONFIG_ZMK_SPLIT)
         .source = ZMK_POSITION_STATE_CHANGE_SOURCE_LOCAL,
 #endif
     };
-
-    zmk_behavior_invoke_binding(binding, behavior_event, true);
-
-    data->pending_release = binding;
-    data->pending_event = behavior_event;
-    k_work_schedule(&data->release_work, K_MSEC(LISM_GESTURE_TAP_MS));
+    k_work_submit(&data->press_work);
 }
 
 static int lism_gesture_handle_event(const struct device *dev, struct input_event *event,
@@ -139,6 +154,7 @@ static int lism_gesture_handle_event(const struct device *dev, struct input_even
 
 static int lism_gesture_init(const struct device *dev) {
     struct lism_gesture_data *data = dev->data;
+    k_work_init(&data->press_work, lism_gesture_press_work_cb);
     k_work_init_delayable(&data->release_work, lism_gesture_release_work_cb);
     return 0;
 }
