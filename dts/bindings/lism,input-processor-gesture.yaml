@@ -1,0 +1,30 @@
+# Follows the same bindings-array shape as zmkfirmware/zmk's own
+# zmk,input-processor-behaviors.yaml (app/dts/bindings/input_processors/
+# zmk,input-processor-behaviors.yaml, v0.3.0), but instead of a 1:1
+# event-code-to-behavior map, this accumulates trackball motion and fires
+# one of 4 fixed-order behaviors (left/right/up/down) once accumulated
+# movement in the dominant axis crosses `threshold`.
+
+description: |
+  LisM trackball swipe-gesture detector. Accumulates X/Y motion while
+  active and invokes one of 4 behaviors (in order: left, right, up,
+  down) once the dominant axis crosses `threshold`, then resets and
+  enters a `cooldown-ms` window before it can fire again.
+
+compatible: "lism,input-processor-gesture"
+
+include: ip_zero_param.yaml
+
+properties:
+  bindings:
+    type: phandle-array
+    required: true
+    description: exactly 4 behavior bindings, in order [left, right, up, down]
+  threshold:
+    type: int
+    default: 300
+    description: accumulated counts in the dominant axis needed to fire a gesture
+  cooldown-ms:
+    type: int
+    default: 300
+    description: minimum time after firing before another gesture can fire
