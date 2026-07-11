@@ -560,7 +560,15 @@ static void seed_test_combo_work_handler(struct k_work *work) {
         return;
     }
 
-    zmk_behavior_local_id_t kp_id = zmk_behavior_get_local_id("key_press");
+    /* Device name for the &kp behavior varies by build; try the usual spellings. */
+    static const char *const kp_names[] = {"key_press", "KEY_PRESS", "kp"};
+    zmk_behavior_local_id_t kp_id = UINT16_MAX;
+    for (int i = 0; i < ARRAY_SIZE(kp_names); i++) {
+        kp_id = zmk_behavior_get_local_id(kp_names[i]);
+        if (kp_id != UINT16_MAX) {
+            break;
+        }
+    }
     if (kp_id == UINT16_MAX) {
         LOG_ERR("test combo: key_press behavior not found, skipping seed");
         return;
