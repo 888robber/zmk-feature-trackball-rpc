@@ -71,10 +71,6 @@ static bool notify_enabled;
 static uint8_t last_op;
 static uint8_t last_result;
 
-/* Dump progress: -2 = BEGIN pending, 0..SLOTS-1 = next slot to try,
- * SLOTS = END pending, -1 = idle. Only touched on the system workqueue. */
-static int dump_cursor = -1;
-
 static void ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value);
 static ssize_t on_write(struct bt_conn *conn, const struct bt_gatt_attr *attr, const void *buf,
                         uint16_t len, uint16_t offset, uint8_t flags);
@@ -87,72 +83,59 @@ BT_GATT_SERVICE_DEFINE(combo_rpc_svc, BT_GATT_PRIMARY_SERVICE(&combo_rpc_service
                                               BT_GATT_PERM_WRITE, NULL, on_write, NULL),
                        BT_GATT_CCC(ccc_cfg_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE), );
 
+/* Emits one packet, retrying briefly if the controller's TX buffers are
+ * momentarily exhausted. Runs on the system workqueue; the short bounded
+ * sleep is acceptable and only ever hit under notification bursts. */
 static int notify_packet(const uint8_t *packet, size_t len) {
-    return bt_gatt_notify_uuid(NULL, &combo_rpc_char_uuid.uuid, combo_rpc_svc.attrs, packet, len);
+    for (int attempt = 0; attempt < 10; attempt++) {
+        int ret = bt_gatt_notify_uuid(NULL, &combo_rpc_char_uuid.uuid, combo_rpc_svc.attrs, packet,
+                                      len);
+        if (ret != -ENOMEM && ret != -EAGAIN && ret != -ENOBUFS) {
+            return ret;
+        }
+        k_sleep(K_MSEC(10));
+    }
+    return -ENOMEM;
 }
 
-static void dump_work_handler(struct k_work *work);
-static K_WORK_DELAYABLE_DEFINE(dump_work, dump_work_handler);
-
-static void dump_work_handler(struct k_work *work) {
-    if (!notify_enabled) {
-        dump_cursor = -1;
-        return;
-    }
-
-    while (dump_cursor != -1) {
-        uint8_t packet[2 + LISM_COMBO_RECORD_WIRE_LEN];
-        size_t len;
-        int next;
-
-        if (dump_cursor == -2) {
-            packet[0] = OP_DUMP_BEGIN;
-            packet[1] = (uint8_t)lism_combo_active_count();
-            packet[2] = LISM_COMBO_SLOTS;
-            packet[3] = LISM_COMBO_MAX_KEYS;
-            len = 4;
-            next = 0;
-        } else if (dump_cursor >= LISM_COMBO_SLOTS) {
-            packet[0] = OP_DUMP_END;
-            packet[1] = last_op;
-            packet[2] = last_result;
-            len = 3;
-            next = -1;
-        } else {
-            const struct lism_combo_record *rec = lism_combo_get((uint8_t)dump_cursor);
-            if (rec == NULL) {
-                dump_cursor++;
-                continue;
-            }
-            packet[0] = OP_COMBO_RECORD;
-            packet[1] = (uint8_t)dump_cursor;
-            memcpy(&packet[2], rec, LISM_COMBO_RECORD_WIRE_LEN);
-            len = 2 + LISM_COMBO_RECORD_WIRE_LEN;
-            next = dump_cursor + 1;
-        }
-
-        int ret = notify_packet(packet, len);
-        if (ret == -ENOMEM || ret == -EAGAIN || ret == -ENOBUFS) {
-            /* TX buffers exhausted — retry shortly without advancing. */
-            k_work_schedule(&dump_work, K_MSEC(20));
-            return;
-        }
-        if (ret < 0) {
-            LOG_WRN("combo-rpc dump notify failed: %d, aborting dump", ret);
-            dump_cursor = -1;
-            return;
-        }
-
-        dump_cursor = next;
-    }
-}
-
-static void start_dump(void) {
+/* Sends the whole combo table as one BEGIN / RECORD* / END burst. Called
+ * synchronously from the command workqueue so that each processed command
+ * produces exactly one dump ending in exactly one DUMP_END — the app pairs
+ * those 1:1 with its in-flight requests. */
+static void emit_dump(void) {
     if (!notify_enabled) {
         return;
     }
-    dump_cursor = -2;
-    k_work_schedule(&dump_work, K_NO_WAIT);
+
+    uint8_t packet[2 + LISM_COMBO_RECORD_WIRE_LEN];
+
+    packet[0] = OP_DUMP_BEGIN;
+    packet[1] = (uint8_t)lism_combo_active_count();
+    packet[2] = LISM_COMBO_SLOTS;
+    packet[3] = LISM_COMBO_MAX_KEYS;
+    if (notify_packet(packet, 4) < 0) {
+        LOG_WRN("combo-rpc dump BEGIN notify failed, aborting dump");
+        return;
+    }
+
+    for (int slot = 0; slot < LISM_COMBO_SLOTS; slot++) {
+        const struct lism_combo_record *rec = lism_combo_get((uint8_t)slot);
+        if (rec == NULL) {
+            continue;
+        }
+        packet[0] = OP_COMBO_RECORD;
+        packet[1] = (uint8_t)slot;
+        memcpy(&packet[2], rec, LISM_COMBO_RECORD_WIRE_LEN);
+        if (notify_packet(packet, 2 + LISM_COMBO_RECORD_WIRE_LEN) < 0) {
+            LOG_WRN("combo-rpc dump RECORD notify failed, aborting dump");
+            return;
+        }
+    }
+
+    packet[0] = OP_DUMP_END;
+    packet[1] = last_op;
+    packet[2] = last_result;
+    notify_packet(packet, 3);
 }
 
 static void process_cmd(const struct combo_cmd *cmd) {
@@ -197,17 +180,20 @@ static void process_cmd(const struct combo_cmd *cmd) {
 
 static void cmd_work_handler(struct k_work *work) {
     struct combo_cmd cmd;
-    bool processed_any = false;
 
-    while (k_msgq_get(&combo_cmd_q, &cmd, K_NO_WAIT) == 0) {
+    /* Process exactly one command per run so every command produces exactly
+     * one full-table dump (ending in DUMP_END) — the app matches those 1:1
+     * to its in-flight requests. Resubmit while more remain. Also reached
+     * with an empty queue from the CCC-subscribe path, where the dump is the
+     * whole point. */
+    if (k_msgq_get(&combo_cmd_q, &cmd, K_NO_WAIT) == 0) {
         process_cmd(&cmd);
-        processed_any = true;
+        if (k_msgq_num_used_get(&combo_cmd_q) > 0) {
+            k_work_submit(&cmd_work);
+        }
     }
 
-    /* Also reached with an empty queue from the CCC-subscribe path, where
-     * the dump itself is the point. */
-    ARG_UNUSED(processed_any);
-    start_dump();
+    emit_dump();
 }
 
 static K_WORK_DEFINE(cmd_work, cmd_work_handler);
