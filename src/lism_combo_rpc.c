@@ -27,6 +27,7 @@
  * touches engine state directly.
  */
 
+#include <string.h>
 #include <zephyr/kernel.h>
 #include <zephyr/init.h>
 #include <zephyr/bluetooth/bluetooth.h>
@@ -178,6 +179,9 @@ static void process_cmd(const struct combo_cmd *cmd) {
     last_result = (uint8_t)MIN(result, 255);
 }
 
+static void cmd_work_handler(struct k_work *work);
+static K_WORK_DEFINE(cmd_work, cmd_work_handler);
+
 static void cmd_work_handler(struct k_work *work) {
     struct combo_cmd cmd;
 
@@ -195,8 +199,6 @@ static void cmd_work_handler(struct k_work *work) {
 
     emit_dump();
 }
-
-static K_WORK_DEFINE(cmd_work, cmd_work_handler);
 
 static ssize_t on_write(struct bt_conn *conn, const struct bt_gatt_attr *attr, const void *buf,
                         uint16_t len, uint16_t offset, uint8_t flags) {

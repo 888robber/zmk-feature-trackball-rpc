@@ -20,6 +20,7 @@
  */
 
 #include <limits.h>
+#include <string.h>
 #include <zephyr/kernel.h>
 #include <zephyr/init.h>
 #include <zephyr/settings/settings.h>
